@@ -74,6 +74,22 @@ In that 22U cabinet, you could fit *54 servers*.... now we're talking.
 # Routing
 FRRouting
 
+## Public IP Space 
+So you want to learn IPv6? Well, you could get your own ASN and IP space for about $1000.
+- ASN: 500$
+- /36 IPv6: 500$
+
+_/36 is the smallest ARIN will allocate at the time of writing_
+
+Seems a little steep for most home SREs. But imagine all the money you'll save in not buying rackmount servers or powering them. 
+
+With the routing setup and OpenSwitch, you can advertise your IP space through a provider like Equinix Metal (ask me how I know). You'll be able to have your own publicly routable IPv6 space. You can also use AWS BYOIP and [TransitGateway Connect](https://aws.amazon.com/about-aws/whats-new/2020/12/introducing-aws-transit-gateway-connect-to-simplify-sd-wan-branch-connectivity/)
+
+If you're more adventurous, have a bottomless wallet, or already have IPv4 space, you can do that too. 
+
+## Accessing Your Microdatacenter (no static addressing from your home ISP)
+You can use either wireguard or IPSec up to an Equinix Metal host or to AWS (or any other provider that can handle BGP)
+
 # Elastic IPs
 FRRouting with /32s
 
