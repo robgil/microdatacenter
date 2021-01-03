@@ -31,7 +31,6 @@ In this draft design, I'll lay out the rack design and hardware necessary to pow
 - [Raspberry Pi DIN Rail Mount](https://shop.inux3d.com/en/home/50-terrapi-d-din-rail-terrapi-modular-system-for-raspberry-pi.html)
 - [USB to SATA Cable](https://shop.inux3d.com/en/home/28-55-25-sata-to-usb-adapter-with-cable-for-ssd-and-hard-drive-usb-30-sata-iii-black.html#/11-color-black)
 - [2.5inch SSD](https://www.amazon.com/Samsung-500GB-Internal-MZ-76E500B-AM/dp/B0781Z7Y3S/)
-- [Raspberry Pi POE HAT](https://www.raspberrypi.org/products/poe-hat/)
 
 # The Rack
 Do you need to do 1/2 a cabinet? No. You could do this smaller. But for this example, I'll do 1/2 a cabinet with room for things like battery backup / UPS
