@@ -30,7 +30,7 @@ In this draft design, I'll lay out the rack design and hardware necessary to pow
 - POE Switch (Ex. [NETGEAR 24 Port POE Switch](https://www.amazon.com/NETGEAR-24-Port-Gigabit-Ethernet-Unmanaged/dp/B07Z8P4ZPW/))
 - [Raspberry Pi DIN Rail Mount](https://www.amazon.com/Winford-Engineering-Raspberry-L-Bracket-Compliant/dp/B083YSWYW1/)
 - [NVMe 2242](https://www.amazon.com/Sabrent-DRAM-Less-Internal-Performance-SB-1342-512/dp/B07XVR1KKR/)
-- [PoE USB C Splitter](https://www.amazon.com/UCTRONICS-PoE-Splitter-USB-C-Compliant/dp/B087F4QCTR/)
+- [PoE USB C Splitter](https://www.amazon.com/dp/B0CHW5K5F4) Be careful with PoE USB Splitters. Not all are created equal. The one I linked is 5v at 4 Amp. The [Utronics](https://www.amazon.com/UCTRONICS-PoE-Splitter-USB-C-Compliant/dp/B087F4QCTR/) is only 2.4 Amp. I've also had some of the Utronics fail on me, so it's worth it to get a beefier splitter, especially if you have more to power. 
 
 # The Rack
 Do you need to do 1/2 a cabinet? No. You could do this smaller. But for this example, I'll do 1/2 a cabinet with room for things like battery backup / UPS
