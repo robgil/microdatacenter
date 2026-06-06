@@ -58,7 +58,7 @@ In this draft design, I'll lay out the rack design and hardware necessary to pow
 - 2x [6U DIN Mount with cable management](https://www.amazon.com/Rackmount-Din-Rail-Panel-6U/dp/B00SG3PGWK/)
 - [Raspberry Pi 4 CM4](https://www.adafruit.com/product/4564)
 - [Raspberry Pi 4 Carrier Board](https://www.waveshare.com/cm4-io-base-b.htm)
-- POE Switch (Ex. [NETGEAR 24 Port POE Switch](https://www.amazon.com/NETGEAR-24-Port-Gigabit-Ethernet-Unmanaged/dp/B07Z8P4ZPW/))
+- PoE switch — any 24-port PoE switch works for the draft (Ex. [NETGEAR 24 Port POE Switch](https://www.amazon.com/NETGEAR-24-Port-Gigabit-Ethernet-Unmanaged/dp/B07Z8P4ZPW/)). **What this build actually used:** a [MikroTik RB5009UPr+S+IN](https://mikrotik.com/product/rb5009upr_s_in) per leaf — it doubles as the L3 leaf router *and* the PoE source (8× PoE-out, ~130 W budget at 25 W/port), so no separate dumb PoE switch is needed — uplinked over 10G SFP+ to a [MikroTik CRS309-1G-8S+IN](https://mikrotik.com/product/crs309_1g_8s_in) L3 spine (8× SFP+). See *How it's actually built → Routing* below.
 - [Raspberry Pi DIN Rail Mount](https://www.amazon.com/Winford-Engineering-Raspberry-L-Bracket-Compliant/dp/B083YSWYW1/)
 - [NVMe 2242](https://www.amazon.com/Sabrent-DRAM-Less-Internal-Performance-SB-1342-512/dp/B07XVR1KKR/)
 - [PoE USB C Splitter](https://www.amazon.com/dp/B0CHW5K5F4) Be careful with PoE USB Splitters. Not all are created equal. The one I linked is 5v at 4 Amp. The [Utronics](https://www.amazon.com/UCTRONICS-PoE-Splitter-USB-C-Compliant/dp/B087F4QCTR/) is only 2.4 Amp. I've also had some of the Utronics fail on me, so it's worth it to get a beefier splitter, especially if you have more to power.
@@ -135,8 +135,20 @@ networking, below):
 `g1d.large` (Jetson Orin Nano Super dev kit + 1 TB) ~**$400** — ~$150 of which is the SSD alone. If
 those boards are on the roadmap, buying the drives sooner is the hedge against further NAND increases.
 
-**Networking + shared infra (priced separately):** each PoE node consumes a switch port — a 24-port
-PoE switch runs $180–390 (~$8–16/port) — plus the rack above (~$574) and a UPS.
+**Networking + shared infra (priced separately):** each PoE node consumes a switch port. A generic
+24-port PoE switch runs $180–390 (~$8–16/port), but this build went MikroTik so the leaf router *is*
+the PoE source — no separate switch:
+
+| device | role | qty | ~unit (Jun 2026) |
+|---|---|---|---|
+| [RB5009UPr+S+IN](https://mikrotik.com/product/rb5009upr_s_in) | leaf router **+** PoE source (8× PoE-out, 130 W) | 1 | ~$240–255 |
+| [CRS309-1G-8S+IN](https://mikrotik.com/product/crs309_1g_8s_in) | 10G L3 spine (8× SFP+) | 1 | ~$269 |
+| 10G SFP+ DAC / RJ45-SFP | leaf↔spine + core uplinks | a few | ~$15–40 ea |
+
+**One leaf is all you need to get going:** a single RB5009 covers all 5 CM4 nodes' PoE on its 8 ports
+(with room to grow) and uplinks to the spine. That's around **~$520** of MikroTik gear — plus the rack
+above (~$574) and a UPS. Add a second RB5009 only when you outgrow one leaf (this build adds leaf02 for
+a separate garage/storage cluster, but it's optional).
 
 > Could you get used gear for this cheap? Yes. Would it be more powerful? Yes. But...
 > - It's bulky as hell (rackmount or old desktop)
@@ -144,7 +156,7 @@ PoE switch runs $180–390 (~$8–16/port) — plus the rack above (~$574) and a
 > - Is not expandable
 > - Doesn't grow past the built in number of SATA ports
 >
-> Price-check sources: [RPi CM4 brief](https://datasheets.raspberrypi.com/cm4/cm4-product-brief.pdf), [SSD tracking — NAND crisis (Tom's Hardware)](https://www.tomshardware.com/pc-components/ssds/ssd-price-tracking-2026-lowest-price-on-every-m-2-ssd), [Sabrent SB-1342-512 (out of stock)](https://www.newegg.com/sabrent-rocket-2242-512gb/p/0D9-001Y-00018), [NETGEAR 24-port PoE](https://www.netgear.com/business/wired/switches/24-port-switch/).
+> Price-check sources: [RPi CM4 brief](https://datasheets.raspberrypi.com/cm4/cm4-product-brief.pdf), [SSD tracking — NAND crisis (Tom's Hardware)](https://www.tomshardware.com/pc-components/ssds/ssd-price-tracking-2026-lowest-price-on-every-m-2-ssd), [Sabrent SB-1342-512 (out of stock)](https://www.newegg.com/sabrent-rocket-2242-512gb/p/0D9-001Y-00018), [NETGEAR 24-port PoE](https://www.netgear.com/business/wired/switches/24-port-switch/), [MikroTik RB5009UPr+S+IN](https://mikrotik.com/product/rb5009upr_s_in), [MikroTik CRS309-1G-8S+IN](https://mikrotik.com/product/crs309_1g_8s_in).
 
 # Density
 With the above BOM we'll be able to get roughly 18 servers into 6U. This assumes 2" width per server. If you choose to go with SSD instead of NVMe, it can be cheaper, but you'll need additional DIN mounts and it takes up more rack space. Also add on the cost of the USB cables.
@@ -156,6 +168,54 @@ The draft below called the shots on the broad strokes; here's where each landed.
 
 ## Routing
 [FRRouting](https://frrouting.org/) is the routing stack — substantially cheaper than buying/reusing a purpose-built switch or router, and the point is to learn the internals. The micro datacenter runs a **routed spine/leaf BGP fabric**: an x86 edge router (FRR, the only NAT) → a CRS309 L3 spine → RB5009 leaves, every box its own private ASN (eBGP-to-the-device). Transit links are routed `/30`s; LAN edges are VLAN-segmented. (The teased eVPN/VXLAN multi-tenant overlay is handled at the k8s layer by Cilium rather than on the fabric itself.)
+
+### L1 — Physical
+The fabric routes through the **spine01** L3 spine (CRS309); leaf02/garage is racked but powered off (optional second leaf).
+
+```mermaid
+flowchart LR
+  net(("Internet")):::ext
+  net -. "Wi-Fi" .-> ody["core01 (Odyssey) — core/NAT<br/>AS65000 · wlo2 + enp3s0"]:::core
+  ody ==>|"1G · RJ45-SFP<br/>10.255.0.1 ↔ .2"| crs["spine01 (CRS309) — L3 spine<br/>AS65100 · HW-offload"]:::spine
+  crs ==>|"10G DAC<br/>10.255.0.5 ↔ .6"| rb1["leaf01 (router1) — leaf<br/>AS65200 · 10.1.0.0/16"]:::leaf
+  crs -.->|"10G · sfp2 · optional (off)"| rb2["leaf02 (router2) — garage leaf<br/>AS65201 · 10.2.0.0/16"]:::leaf
+  rb1 ==>|"1G · ether3–7 · VLAN20"| k8s["k8s — 5× RPi CM4<br/>AS65300 · mdc01–05"]:::k8s
+  crs ==>|"10G · sfp4 (Ollama)"| mac["Mac — workload + mgmt<br/>en0 10.255.40.10 (10G)<br/>dongle → ether1 (mgmt)"]:::host
+  classDef ext fill:#0f172a,stroke:#000,color:#e2e8f0
+  classDef core fill:#f59e0b,stroke:#b45309,color:#1f2937
+  classDef spine fill:#3b82f6,stroke:#1d4ed8,color:#fff
+  classDef leaf fill:#10b981,stroke:#047857,color:#042b21
+  classDef k8s fill:#a855f7,stroke:#7e22ce,color:#fff
+  classDef host fill:#64748b,stroke:#334155,color:#fff
+```
+
+The five Pis are the **k3s cluster** (`mdc01–05`, AS 65300): each CM4 has a single 1 GbE into `ether3–7` on VLAN 20, and BGP-peers `leaf01` to advertise its Cilium LoadBalancer IPs (`100.65.0.0/24`). The single RB5009 leaf also sources their PoE.
+
+### L3 — Routing / BGP
+eBGP-to-the-device (each box its own private ASN). core01 originates the default and is the only NAT; leaves advertise their LAN; the **spine01 spine transits everything** and routes inter-leaf traffic in hardware at 10G. Only internet egress uses core01's Wi-Fi. Management is loopback-based over BGP.
+
+```mermaid
+flowchart TD
+  ody["core01 (Odyssey) · AS65000<br/>10.255.0.1<br/>originates 0.0.0.0/0 · NAT → Wi-Fi"]:::core
+  ody ==>|"eBGP"| crs["spine01 (CRS309) · AS65100<br/>loopback 10.255.255.10<br/>L3 HW-offload · pure transit"]:::spine
+  crs ==>|"eBGP · default ↓ · leaf routes ↔"| rb1["leaf01 (router1) · AS65200<br/>loopback 10.255.255.1 · 10.1.0.0/16"]:::leaf
+  crs -.->|"eBGP · optional (off)"| rb2["leaf02 (router2) · AS65201<br/>10.2.0.0/16"]:::leaf
+  k8s["k8s nodes · AS65300<br/>mdc01–05 · Cilium BGP"]:::k8s ==>|"eBGP · LB 100.65.0.0/24 (ECMP ×5)"| rb1
+  classDef core fill:#f59e0b,stroke:#b45309,color:#1f2937
+  classDef spine fill:#3b82f6,stroke:#1d4ed8,color:#fff
+  classDef leaf fill:#10b981,stroke:#047857,color:#042b21
+  classDef k8s fill:#a855f7,stroke:#7e22ce,color:#fff
+```
+
+| Speaker | Advertises | Receives |
+|---|---|---|
+| core01 (65000) | `0.0.0.0/0` | leaf LANs + loopbacks |
+| spine01 (65100) | `default-originate` ↓ to leaves + leaf routes ↔ + loopbacks | default + leaf routes |
+| leaf01 (65200) | `10.1.x` LAN + LB `100.65.0.0/24` + loopback `10.255.255.1` | default; (`10.2.0.0/16` when leaf02 up) |
+| leaf02 (65201) | `10.2.0.0/16` | default; `10.1.0.0/16` |
+| k8s nodes (65300) | `100.65.0.0/24` (LB /32s, Cilium localPort 1790) | — (Cilium installs default via VLAN20 gw) |
+
+(Diagrams mirror the canonical topology in the [`infra`](../infra) repo.)
 
 ## Public IP space & Elastic IPs
 So you want to learn IPv6? You could get your own ASN and IP space for about $1000 (ASN $500, /36 IPv6 $500 — the smallest ARIN allocates). With the routing setup you can advertise that space through a provider like Equinix Metal, or use AWS BYOIP + Transit Gateway Connect. **Elastic IPs** — a public IP NAT'd to a private one — are achieved here without fancy offload NICs by running **BGP on every node**: for Kubernetes workloads, **Cilium** advertises the service IP via BGP to the core network and out (if you're peering publicly).
@@ -171,6 +231,24 @@ The draft favored [minio](https://min.io/) for a simple S3-like API. The project
 
 ## Firewall
 Kept simple to understand it — no PFSense. We do it the hard way for learning: `nftables` / `bpfilter` / `iptables` on the hosts, leaf forward-chain policy on the RB5009s, and Cilium NetworkPolicy in-cluster (default-deny between segments).
+
+# The MikroTik API: network-as-code & multi-tenancy
+The reason this build standardized on MikroTik isn't the price — it's that **RouterOS is programmable**. Every box (leaf, spine, edge) exposes the same API surface, so the fabric can be driven the same way the rest of this cloud already is: declaratively, from Git, reconciled by a controller. Today the routers are still configured imperatively (SSH + versioned `.rsc` snapshots, and in a couple of spots a fragile `expect` wrapper); the API is the path off that.
+
+## What RouterOS exposes
+- **REST API** (RouterOS v7.1+): a JSON wrapper over the console, reached at `https://<router>/rest/...` once the `www-ssl` service is on (HTTPS only — don't enable plain `www`). Full CRUD plus arbitrary console commands, and the URL path maps 1:1 to the CLI menu tree — `/ip/firewall/filter`, `/interface/vlan`, `/routing/bgp/connection` are all addressable resources. Both lab boxes already run a REST-capable release (leaf01 on 7.8, spine01 on 7.15.3); it's simply **not enabled yet** — a scoped service on a management address-list is the next step.
+- **Legacy binary API** (TCP 8728, or API-SSL 8729) for older tooling.
+- **IaC providers** that wrap the above: the [`terraform-routeros`](https://registry.terraform.io/providers/terraform-routeros/routeros/latest) provider and Ansible's [`community.routeros`](https://galaxy.ansible.com/ui/repo/published/community/routeros/) collection — so VLANs, firewall rules, address-lists, and BGP sessions become plan-and-apply resources with state and drift detection, exactly like the OpenTofu stacks that already manage our AWS account.
+
+## Why this is the future of multi-tenant isolation
+A tenant on this fabric is really just a bundle of network objects: a **VLAN** (or VRF) and subnet per leaf, an **address-list** for its hosts, **forward-chain firewall rules** (default-deny, allow only that tenant's flows), and **BGP filters** controlling which prefixes it may advertise or receive. All of those are API resources. Mint them programmatically and you get **VPC-style isolation as a primitive** — the self-hosted answer to AWS VPCs + security groups, on $250 hardware.
+
+The payoff is closing the gap this doc keeps flagging — *"not yet a single integrated control plane; RouterOS and Cilium are managed separately."* With the API on, both halves become reconcilable from one place:
+
+- **Fabric layer (RouterOS):** per-tenant VLAN/subnet, inter-segment firewall policy, BGP import/export filters.
+- **Cluster layer (Cilium):** per-tenant `NetworkPolicy`, LB-IPAM pools, BGP peering for the tenant's service IPs.
+
+A small operator — a tenant `Tenant` CRD reconciled by Flux, the same GitOps loop that already drives [Garage, Zot, cert-manager, and the AWS stacks](#the-cloud-it-became-aws--self-hosted) — could render one declaration into **both** RouterOS API calls and Cilium objects. That's tenant isolation that spans wire and cluster from a single source of truth: declarative, auditable (every change a Git commit), and self-healing. The hardware is already capable; turning on the API is what makes the network a first-class, programmable part of the cloud instead of the one box you still SSH into by hand.
 
 # Power budget
 Beyond the nodes, the fabric shares the rack's envelope:
