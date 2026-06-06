@@ -1,5 +1,9 @@
 # Micro Datacenter Project
-This is a project to compile the necessary information to create a personal micro datacenter. This is largely for educational purposes, but can also be used for a personal lab or hosting personal services (website, files, etc)
+This is a project to compile the necessary information to create a personal micro datacenter. This is largely for educational purposes, but can also be used for a personal lab or hosting personal services (website, files, etc).
+
+> **About this doc:** the first half is the original **draft design** — the rack, the BOM, the
+> low-power host. The second half is **where it went**: a working, AWS-style **private cloud** built
+> on that rack. Cost figures are reconciled to a **June 2026** price check (see *Cost: then vs now*).
 
 ## What is a micro datacenter?
 This is largely opinion, but for the purposes of this project, we'll define it as the following.
@@ -8,7 +12,7 @@ _A micro datacenter is a fully functioning, ultra low power, and distributed dat
 
 Also, it's bare metal...
 
-But why? 
+But why?
 
 Most folks, myself included, have always run some form of lab at home. This comes with a host of challenges and annoyances.
 - Enormous power requirements for anything more than 1/2 a rack of servers
@@ -16,21 +20,48 @@ Most folks, myself included, have always run some form of lab at home. This come
 - Old servers that are out of support, clunky, expensive to fix and upgrade, etc
 - Overloading those servers with VMs
 - Many folks run VMWare ESX, but that can be pricey
-- Upgrades? What's that? 
-  - Who actually has the funds to regularly ugprade their lab?
+- Upgrades? What's that?
+  - Who actually has the funds to regularly upgrade their lab?
+
+## The cloud it became: AWS → self-hosted
+The rack below now runs as a small **AWS-style private cloud** — object storage, a container registry,
+certificate issuance, software-defined networking, DNS, load balancing, GitOps delivery — all
+self-hosted, all on an internal `.internal` TLD, no public cloud bill.
+
+| AWS service | Self-hosted equivalent | Notes |
+|---|---|---|
+| **S3** (object store) | **Garage** (Deuxfleurs) | 2-node `rf=2` on USB SSDs; TLS → `s3.internal`. Backs OpenTofu state + the registry. |
+| **ECR** (container registry) | **Zot** (OCI registry) | HTTPS → `registry.internal`; backed by a Garage `oci-registry` bucket. |
+| **ACM** (cert management) | **cert-manager** + offline root CA | RSA-4096 `lab-internal-ca` (no Let's Encrypt — `.internal` isn't public); issues `*.internal` leaf certs. |
+| **VPC** (SDN / overlay) | **Cilium** CNI | VXLAN overlay, kube-proxy replacement, IPAM (pods `100.64.0.0/16`, LB `100.65.0.0/24`). |
+| **Internet Gateway / route prop.** | **Cilium BGP** + leaf/spine eBGP | Cilium (AS65300) peers the leaf; LB `/32`s ride the BGP fabric. Default originates at the edge (AS65000). |
+| **ELB / NLB** | **Cilium LB-IPAM** + **kube-vip** | Service VIPs from `100.65.0.0/24`; kube-vip holds the API control-plane VIP. |
+| **Route 53** (DNS) | **PowerDNS-auth** (edge) | Authoritative for `.internal`; leaves recurse to the internet. *(Real Route 53 zones are managed as IaC — below.)* |
+| **NAT Gateway / edge router** | **edge router** (x86, FRR) | The **only** NAT; masquerades out the Wi-Fi uplink, originates the default into BGP. Inside is pure routed BGP. |
+| **VPC DHCP options / DHCP** | **RouterOS DHCP** (leaf) | Per-VLAN DHCP with reservations for the k8s nodes. |
+| **OpenSearch / CloudWatch Logs / CloudTrail** | **Elasticsearch + Kibana** (ECK) | 3 nodes, TLS via cert-manager; Beats ship app/system logs *and* the audit trail (k8s API audit, host auth/syslog). |
+| **CloudWatch agent** | **Filebeat + Metricbeat** | In-cluster ECK `Beat` DaemonSets + off-cluster on the edge/workstation. |
+| **IAM** | **IAM** (still AWS, IaC-managed) | Imported zero-diff; least-priv automation user drives Route 53 from the cluster. |
+| **CloudFormation / CDK** | **OpenTofu** + **Flux tofu-controller** | GitOps reconcile; state in Garage S3, not AWS S3. |
+| **CodePipeline + CodeDeploy** (CD) | **Flux** (GitOps) | No AWS service maps 1:1 — AWS's *own* answer is the managed **Flux add-on for EKS**, so we run upstream Flux. Pull-only, zero inbound. |
+| **Network firewall / security groups** | leaf forward-chain (RB5009) + Cilium policy | Default-deny between segments. *Not yet a single integrated control plane* — RouterOS + Cilium are managed separately. |
+
+The only "real" AWS left is an account managed **as IaC from the lab**: OpenTofu stacks (`iam/`,
+`route53/`) keep their state in our own Garage S3 and are reconciled by an in-cluster Flux
+tofu-controller. Even the cloud account is run from the micro datacenter's own services.
 
 # Draft Design
-In this draft design, I'll lay out the rack design and hardware necessary to power dozens of servers. 
+In this draft design, I'll lay out the rack design and hardware necessary to power dozens of servers.
 
 ## BOM
 - [Mobile 1/2 cabinet](https://www.amazon.com/NavePoint-Server-Cabinet-Casters-Shelves/dp/B01I48EJOW/) (or 1/4 cabinet if you want to do a smaller version)
 - 2x [6U DIN Mount with cable management](https://www.amazon.com/Rackmount-Din-Rail-Panel-6U/dp/B00SG3PGWK/)
 - [Raspberry Pi 4 CM4](https://www.adafruit.com/product/4564)
 - [Raspberry Pi 4 Carrier Board](https://www.waveshare.com/cm4-io-base-b.htm)
-- POE Switch (Ex. [NETGEAR 24 Port POE Switch](https://www.amazon.com/NETGEAR-24-Port-Gigabit-Ethernet-Unmanaged/dp/B07Z8P4ZPW/))
+- PoE switch — any 24-port PoE switch works for the draft (Ex. [NETGEAR 24 Port POE Switch](https://www.amazon.com/NETGEAR-24-Port-Gigabit-Ethernet-Unmanaged/dp/B07Z8P4ZPW/)). **What this build actually used:** a [MikroTik RB5009UPr+S+IN](https://mikrotik.com/product/rb5009upr_s_in) per leaf — it doubles as the L3 leaf router *and* the PoE source (8× PoE-out, ~130 W budget at 25 W/port), so no separate dumb PoE switch is needed — uplinked over 10G SFP+ to a [MikroTik CRS309-1G-8S+IN](https://mikrotik.com/product/crs309_1g_8s_in) L3 spine (8× SFP+). See *How it's actually built → Routing* below.
 - [Raspberry Pi DIN Rail Mount](https://www.amazon.com/Winford-Engineering-Raspberry-L-Bracket-Compliant/dp/B083YSWYW1/)
 - [NVMe 2242](https://www.amazon.com/Sabrent-DRAM-Less-Internal-Performance-SB-1342-512/dp/B07XVR1KKR/)
-- [PoE USB C Splitter](https://www.amazon.com/dp/B0CHW5K5F4) Be careful with PoE USB Splitters. Not all are created equal. The one I linked is 5v at 4 Amp. The [Utronics](https://www.amazon.com/UCTRONICS-PoE-Splitter-USB-C-Compliant/dp/B087F4QCTR/) is only 2.4 Amp. I've also had some of the Utronics fail on me, so it's worth it to get a beefier splitter, especially if you have more to power. 
+- [PoE USB C Splitter](https://www.amazon.com/dp/B0CHW5K5F4) Be careful with PoE USB Splitters. Not all are created equal. The one I linked is 5v at 4 Amp. The [Utronics](https://www.amazon.com/UCTRONICS-PoE-Splitter-USB-C-Compliant/dp/B087F4QCTR/) is only 2.4 Amp. I've also had some of the Utronics fail on me, so it's worth it to get a beefier splitter, especially if you have more to power.
 
 # The Rack
 Do you need to do 1/2 a cabinet? No. You could do this smaller. But for this example, I'll do 1/2 a cabinet with room for things like battery backup / UPS
@@ -40,90 +71,207 @@ Do you need to do 1/2 a cabinet? No. You could do this smaller. But for this exa
 
 Total: $574.00
 
-# The basic host
+# The basic host → instance types
 The basic host configuration is as follows
 - PoE Powered Raspberry Pi
 - NVMe Attached Disk
 - Vertically mounted on DIN rails
 - No case required - better airflow and cooling
 
-This ultra low profile design dispenses with the bulky and failure prone PoE HATs. The PoE hats often have fan failures and take up valuable HAT space for other things. The carrier board in this BOM has the NVMe on the bottom of the board. With this design, the disk and PoE do not take up any HAT space and also don't glog up the rack with USB cables. The NVMe is also attached with PCIe speed rather than USB. 
+This ultra low profile design dispenses with the bulky and failure prone PoE HATs. The PoE hats often have fan failures and take up valuable HAT space for other things. The carrier board in this BOM has the NVMe on the bottom of the board. With this design, the disk and PoE do not take up any HAT space and also don't clog up the rack with USB cables. The NVMe is also attached with PCIe speed rather than USB.
 
-Cost
-- NVMe (512G): 69$
-- Raspberry Pi 4 (8G): 75$
-- Waveshare Carrier Board: 30$
-- DIN Mount: 15$
-- Network Port (Switch / Num Ports): $ 11.45 per port (1)
-- POE Splitter: 20$
+As the cluster grew, hosts got **AWS-style instance handles** (k8s label `node.lab/instance-type`).
+Handle format `<family><gen><storage>.<size>`: family `m`=general · `c`=compute · `r`=memory ·
+`n`=NPU · `g`=GPU; `d`=local NVMe; size = memory t-shirt (`large`=8 GiB, `xlarge`=16 GiB). The "basic
+host" above is now `m1d.large`.
 
-Total: $221.00 / node
+| instance-type | hardware | CPU | mem | disk | accel | status |
+|---|---|---|---|---|---|---|
+| `m1d.large` | Raspberry Pi CM4 | 4×A72 (ARMv8.0) | 8 GiB | 512 GB NVMe | — | **LIVE** — 5 nodes |
+| `n1d.xlarge` | Orange Pi 5 Pro | RK3588S A76/A55 (ARMv8.2) | 16 GiB | 1 TB NVMe | 6-TOPS NPU | planned |
+| `g1d.large` | Jetson Orin Nano Super | 6×A78AE (ARMv8.2) | 8 GiB | 1 TB NVMe | ~67-TOPS GPU | planned |
 
-Could you get used gear for this cheap? Yes. Would it be more powerful? Yes. But...
-- It's bulky as hell (rackmount or old desktop)
-- Power hungry
-- Is not expandible
-- Doesn't grow past the built in number of SATA ports
+### Power utilization
+Board-level draw with NVMe attached — typical vendor/community figures, not yet metered.
+
+| instance-type | idle | typical | peak (CPU+accel) | notes |
+|---|---|---|---|---|
+| `m1d.large` (CM4) | ~3 W | ~5–6 W | ~7–8 W | 5 nodes ≈ **25–40 W** for the whole cluster. |
+| `n1d.xlarge` (Orange Pi 5 Pro) | ~2–3 W | ~5–7 W | ~10–12 W | RK3588S + NPU; spikes under NPU inference. |
+| `g1d.large` (Jetson Orin Nano Super) | ~5 W | ~10–15 W | **up to 25 W** | Power modes 7/15/25 W; cap via `nvpmodel`. |
+
+The whole live cluster idles around the power of a single light bulb — the original "runs off a
+20A 110V outlet" goal holds with enormous headroom.
+
+# Cost: then vs now
+The original basic-host BOM (still a great deal):
+
+- NVMe (512G): $69
+- Raspberry Pi 4 (8G): $75
+- Waveshare Carrier Board: $30
+- DIN Mount: $15
+- Network Port (Switch / Num Ports): $11.45 per port (1)
+- POE Splitter: $20
+
+Total: **$221.00 / node**
+
+A **June 2026** price check on a like-for-like **node-only** basis (switch-port share moved to
+networking, below):
+
+> ⚠️ **NAND flash crisis (2026):** AI/datacenter demand roughly *doubled* SSD prices year-over-year —
+> 1 TB NVMe now runs ~$150 where it was ~$70. Storage is the dominant cost mover across every node.
+
+| component | then | now (Jun 2026) | Δ | what moved |
+|---|---|---|---|---|
+| Raspberry Pi CM4 (8 GB, no Wi-Fi) | $75 | ~$75 (official $56.25 + reseller markup) | ~$0 | official fell then ticked back up Apr 2026; reseller markup nets flat. |
+| NVMe 512 GB (Sabrent SB-1342-512) | $69 | ~$80 | +$11 | NAND crisis + the exact 2242 SKU is scarce (discontinued). |
+| Waveshare CM4-IO-BASE-B | $30 | ~$43 | +$13 | up. |
+| PoE USB-C splitter (5 V/4 A) | $20 | ~$22 | +$2 | flat. |
+| DIN-rail mount | $15 | ~$16 | +$1 | flat. |
+| **per node (node-only)** | **$209** | **~$236** | **+$27 (~13%)** | |
+| **cluster (×5)** | **$1,045** | **~$1,180** | **+$135** | |
+
+**Planned acceleration nodes** (new, with 1 TB NVMe): `n1d.xlarge` (Orange Pi 5 Pro 16 GB) ~**$330**;
+`g1d.large` (Jetson Orin Nano Super dev kit + 1 TB) ~**$400** — ~$150 of which is the SSD alone. If
+those boards are on the roadmap, buying the drives sooner is the hedge against further NAND increases.
+
+**Networking + shared infra (priced separately):** each PoE node consumes a switch port. A generic
+24-port PoE switch runs $180–390 (~$8–16/port), but this build went MikroTik so the leaf router *is*
+the PoE source — no separate switch:
+
+| device | role | qty | ~unit (Jun 2026) |
+|---|---|---|---|
+| [RB5009UPr+S+IN](https://mikrotik.com/product/rb5009upr_s_in) | leaf router **+** PoE source (8× PoE-out, 130 W) | 1 | ~$240–255 |
+| [CRS309-1G-8S+IN](https://mikrotik.com/product/crs309_1g_8s_in) | 10G L3 spine (8× SFP+) | 1 | ~$269 |
+| 10G SFP+ DAC / RJ45-SFP | leaf↔spine + core uplinks | a few | ~$15–40 ea |
+
+**One leaf is all you need to get going:** a single RB5009 covers all 5 CM4 nodes' PoE on its 8 ports
+(with room to grow) and uplinks to the spine. That's around **~$520** of MikroTik gear — plus the rack
+above (~$574) and a UPS. Add a second RB5009 only when you outgrow one leaf (this build adds leaf02 for
+a separate garage/storage cluster, but it's optional).
+
+> Could you get used gear for this cheap? Yes. Would it be more powerful? Yes. But...
+> - It's bulky as hell (rackmount or old desktop)
+> - Power hungry
+> - Is not expandable
+> - Doesn't grow past the built in number of SATA ports
+>
+> Price-check sources: [RPi CM4 brief](https://datasheets.raspberrypi.com/cm4/cm4-product-brief.pdf), [SSD tracking — NAND crisis (Tom's Hardware)](https://www.tomshardware.com/pc-components/ssds/ssd-price-tracking-2026-lowest-price-on-every-m-2-ssd), [Sabrent SB-1342-512 (out of stock)](https://www.newegg.com/sabrent-rocket-2242-512gb/p/0D9-001Y-00018), [NETGEAR 24-port PoE](https://www.netgear.com/business/wired/switches/24-port-switch/), [MikroTik RB5009UPr+S+IN](https://mikrotik.com/product/rb5009upr_s_in), [MikroTik CRS309-1G-8S+IN](https://mikrotik.com/product/crs309_1g_8s_in).
 
 # Density
-With the above BOM (Bill of Materials) we'll be able to get roughly 18 servers in to 6U. This assumes 2" width per server. If you choose to go with SSD instead of NVMe, it can be cheaper, but you'll need additional DIN mounts and it takes up more rack space. Also add on the cost of the USB cables. 
+With the above BOM we'll be able to get roughly 18 servers into 6U. This assumes 2" width per server. If you choose to go with SSD instead of NVMe, it can be cheaper, but you'll need additional DIN mounts and it takes up more rack space. Also add on the cost of the USB cables.
 
-Basically you'd need a 24port switch for every 6U. 
+Basically you'd need a 24-port switch for every 6U. So in 7U, you'd have the switch, and 18 servers, with cable management. In that 22U cabinet, you could fit *54 servers*.... now we're talking.
 
-So in 7U, you'd have the switch, and 18 servers, with cable management. 
+# How it's actually built
+The draft below called the shots on the broad strokes; here's where each landed.
 
-In that 22U cabinet, you could fit *54 servers*.... now we're talking.
+## Routing
+[FRRouting](https://frrouting.org/) is the routing stack — substantially cheaper than buying/reusing a purpose-built switch or router, and the point is to learn the internals. The micro datacenter runs a **routed spine/leaf BGP fabric**: an x86 edge router (FRR, the only NAT) → a CRS309 L3 spine → RB5009 leaves, every box its own private ASN (eBGP-to-the-device). Transit links are routed `/30`s; LAN edges are VLAN-segmented. (The teased eVPN/VXLAN multi-tenant overlay is handled at the k8s layer by Cilium rather than on the fabric itself.)
 
-# Server Management and Imaging
-[Tinkerbell](https://tinkerbell.org/) is an automated DHCP, NETBOOT, and PXE physical host provisioning service. To keep costs down, you can run this on your desktop in VMs initially. You can also run it on some of your nodes if you have a multi purpose node (something like a shared DHCP, DNS, Tinkerbell, image store, etc)
+### The edge node — "Odyssey" (environment-specific, you probably don't need it)
+**core01** in the diagrams is a [Seeed Studio Odyssey](https://www.seeedstudio.com/Odyssey-Blue-J4125-p-4925.html) — a small x86 single-board computer running FRRouting. In the fabric it's `AS65000`: it originates the default route and is the **only NAT** in the whole build, masquerading the lab out to the internet over its **Wi-Fi** uplink (`wlo2`), with a 1G RJ45-SFP transit link (`enp3s0`) down to the spine.
 
-# Routing
-[FRRouting](https://frrouting.org/) is an Open Source routing stack. This is the stack I would recommend for any home lab. This can be run on any linux host and is substantially cheaper than buying or re-using some purpose build switch or router. The goal of this project is to learn the internals, so running FRR is a good way to familiarize yourself with networking protocols. 
+**Why Wi-Fi, and why it sits outside the rack — this is specific to my environment.** Where this is currently running there's no wired internet drop, so the Odyssey bridges Wi-Fi → the wired fabric and physically lives outside the rack next to the access point. **In a normal deployment you don't need it:** plug your internet handoff (ONT / modem / router uplink) **directly into a spine SFP+ port** and let the spine (or a leaf) handle NAT and default-route origination. The separate edge box is a workaround for "no Ethernet where the rack lives," not part of the core design — read it as an adapter, and mentally collapse `Internet → Odyssey → spine` into `Internet → spine` if you have wired networking.
 
-As we delve in to more detail, FRR becoming increasingly important to learn cloud networking concepts. I'm not talking about simple concepts like IGWs or VPC Route Tables. I mean the underpinning of VPCs in general. In a later article, I'll describe how you can create your own VPC networking with eVPN and VXLAN using FRRouting. This is the basis for undestanding multi tenant network architecture (hint, it's all encapsulated in the datacenter). 
+### L1 — Physical
+The fabric routes through the **spine01** L3 spine (CRS309); leaf02/garage is racked but powered off (optional second leaf).
 
-## Public IP Space 
-So you want to learn IPv6? Well, you could get your own ASN and IP space for about $1000.
-- ASN: 500$
-- /36 IPv6: 500$
+```mermaid
+flowchart LR
+  net(("Internet")):::ext
+  net -. "Wi-Fi" .-> ody["core01 (Odyssey) — core/NAT<br/>AS65000 · wlo2 + enp3s0"]:::core
+  ody ==>|"1G · RJ45-SFP<br/>10.255.0.1 ↔ .2"| crs["spine01 (CRS309) — L3 spine<br/>AS65100 · HW-offload"]:::spine
+  crs ==>|"10G DAC<br/>10.255.0.5 ↔ .6"| rb1["leaf01 (router1) — leaf<br/>AS65200 · 10.1.0.0/16"]:::leaf
+  crs -.->|"10G · sfp2 · optional (off)"| rb2["leaf02 (router2) — garage leaf<br/>AS65201 · 10.2.0.0/16"]:::leaf
+  rb1 ==>|"1G · ether3–7 · VLAN20"| k8s["k8s — 5× RPi CM4<br/>AS65300 · mdc01–05"]:::k8s
+  crs ==>|"10G · sfp4 (Ollama)"| mac["Mac — workload + mgmt<br/>en0 10.255.40.10 (10G)<br/>dongle → ether1 (mgmt)"]:::host
+  classDef ext fill:#0f172a,stroke:#000,color:#e2e8f0
+  classDef core fill:#f59e0b,stroke:#b45309,color:#1f2937
+  classDef spine fill:#3b82f6,stroke:#1d4ed8,color:#fff
+  classDef leaf fill:#10b981,stroke:#047857,color:#042b21
+  classDef k8s fill:#a855f7,stroke:#7e22ce,color:#fff
+  classDef host fill:#64748b,stroke:#334155,color:#fff
+```
 
-_/36 is the smallest ARIN will allocate at the time of writing_
+The five Pis are the **k3s cluster** (`mdc01–05`, AS 65300): each CM4 has a single 1 GbE into `ether3–7` on VLAN 20, and BGP-peers `leaf01` to advertise its Cilium LoadBalancer IPs (`100.65.0.0/24`). The single RB5009 leaf also sources their PoE.
 
-Seems a little steep for most home SREs. But imagine all the money you'll save in not buying rackmount servers or powering them. 
+### L3 — Routing / BGP
+eBGP-to-the-device (each box its own private ASN). core01 originates the default and is the only NAT; leaves advertise their LAN; the **spine01 spine transits everything** and routes inter-leaf traffic in hardware at 10G. Only internet egress uses core01's Wi-Fi. Management is loopback-based over BGP.
 
-With the routing setup and OpenSwitch, you can advertise your IP space through a provider like Equinix Metal (ask me how I know). You'll be able to have your own publicly routable IPv6 space. You can also use AWS BYOIP and [TransitGateway Connect](https://aws.amazon.com/about-aws/whats-new/2020/12/introducing-aws-transit-gateway-connect-to-simplify-sd-wan-branch-connectivity/)
+```mermaid
+flowchart TD
+  ody["core01 (Odyssey) · AS65000<br/>10.255.0.1<br/>originates 0.0.0.0/0 · NAT → Wi-Fi"]:::core
+  ody ==>|"eBGP"| crs["spine01 (CRS309) · AS65100<br/>loopback 10.255.255.10<br/>L3 HW-offload · pure transit"]:::spine
+  crs ==>|"eBGP · default ↓ · leaf routes ↔"| rb1["leaf01 (router1) · AS65200<br/>loopback 10.255.255.1 · 10.1.0.0/16"]:::leaf
+  crs -.->|"eBGP · optional (off)"| rb2["leaf02 (router2) · AS65201<br/>10.2.0.0/16"]:::leaf
+  k8s["k8s nodes · AS65300<br/>mdc01–05 · Cilium BGP"]:::k8s ==>|"eBGP · LB 100.65.0.0/24 (ECMP ×5)"| rb1
+  classDef core fill:#f59e0b,stroke:#b45309,color:#1f2937
+  classDef spine fill:#3b82f6,stroke:#1d4ed8,color:#fff
+  classDef leaf fill:#10b981,stroke:#047857,color:#042b21
+  classDef k8s fill:#a855f7,stroke:#7e22ce,color:#fff
+```
 
-If you're more adventurous, have a bottomless wallet, or already have IPv4 space, you can do that too. 
+| Speaker | Advertises | Receives |
+|---|---|---|
+| core01 (65000) | `0.0.0.0/0` | leaf LANs + loopbacks |
+| spine01 (65100) | `default-originate` ↓ to leaves + leaf routes ↔ + loopbacks | default + leaf routes |
+| leaf01 (65200) | `10.1.x` LAN + LB `100.65.0.0/24` + loopback `10.255.255.1` | default; (`10.2.0.0/16` when leaf02 up) |
+| leaf02 (65201) | `10.2.0.0/16` | default; `10.1.0.0/16` |
+| k8s nodes (65300) | `100.65.0.0/24` (LB /32s, Cilium localPort 1790) | — (Cilium installs default via VLAN20 gw) |
 
-## Accessing Your Microdatacenter (no static addressing from your home ISP)
-You can use either wireguard or IPSec up to an Equinix Metal host or to AWS (or any other provider that can handle BGP)
+(Diagrams mirror the canonical topology in the [`infra`](../infra) repo.)
 
-# Elastic IPs
-Elastic IPs, which you may be familar with from AWS. What this really is is just a public IP that is NAT'd to an ENI/Private IP. How do you achieve this in your microdatacenter? We don't have fancy network cards that offload this, so in order to do this, it's as simple as running BGP on every node. 
+## Public IP space & Elastic IPs
+So you want to learn IPv6? You could get your own ASN and IP space for about $1000 (ASN $500, /36 IPv6 $500 — the smallest ARIN allocates). With the routing setup you can advertise that space through a provider like Equinix Metal, or use AWS BYOIP + Transit Gateway Connect. **Elastic IPs** — a public IP NAT'd to a private one — are achieved here without fancy offload NICs by running **BGP on every node**: for Kubernetes workloads, **Cilium** advertises the service IP via BGP to the core network and out (if you're peering publicly).
 
-For kubernetes workloads, we'll use Cilium to advertise the public IP (Elastic IP) via BGP to the core network and out to the internet (if you're doing public peering)
+## Server management and imaging
+[Tinkerbell](https://tinkerbell.org/) for automated DHCP/NETBOOT/PXE provisioning — runnable in VMs on your desktop initially, or on a shared multi-purpose node (DHCP/DNS/image store). *(In practice the cluster is currently provisioned with Ansible; Tinkerbell remains the netboot direction.)*
 
+## Kubernetes
+[k3s](https://k3s.io/) is the balance point for a home lab — light, with first-class **Cilium** support that ties into the routing stack. Live across the CM4 nodes, with kube-vip for the API VIP and Flux for GitOps delivery of services.
 
-# Firewall
-Firewalls we'll keep simple to understand them. No, we're not going to use PFSense for these exercises. We'll do it the hard way for the purposes of learning. 
+## Distributed storage
+The draft favored [minio](https://min.io/) for a simple S3-like API. The project ultimately landed on **[Garage](https://garagehq.deuxfleurs.fr/)** instead — similarly lightweight and S3-compatible, but a better fit for small, replicated, multi-node setups (currently 2-node `rf=2` across USB SSDs, fronting both the OpenTofu state and the Zot registry).
 
-nftables, bpfilter, iptables, etc
+## DNS (`.internal`)
+[PowerDNS](https://www.powerdns.com/) is authoritative for the internal `.internal` TLD — the Route 53 stand-in for service and host names (`s3.internal`, `registry.internal`, `mdc01.mdc.internal`, etc.). The leaves recurse the public internet and forward `*.internal` queries to it.
 
-# k8s
-Kubernetes has always been a bit of a struggle in home labs. It's annoying running every service and having enough infrastructure to do so. The balance I've found is utilizing [k3s](https://k3s.io/)
+**Caveat (environment-specific):** PowerDNS currently runs on the Odyssey edge node, *outside* the rack — so `.internal` resolution depends on a box that isn't really part of the rack. It **should** be hosted in-rack (on the k8s cluster, or a small service node), and moving it there is a TODO. Same spirit as the edge note above: the current placement reflects my environment, not the intended design.
 
-This has support for things like Cilium, which ties in nicely to the routing stack. 
+## Firewall
+Kept simple to understand it — no PFSense. We do it the hard way for learning: `nftables` / `bpfilter` / `iptables` on the hosts, leaf forward-chain policy on the RB5009s, and Cilium NetworkPolicy in-cluster (default-deny between segments).
 
-# Distributed Storage
-How do you do persistent storage? What can you use for shared storage and object stores? 
+# The MikroTik API: network-as-code & multi-tenancy
+The reason this build standardized on MikroTik isn't the price — it's that **RouterOS is programmable**. Every box (leaf, spine, edge) exposes the same API surface, so the fabric can be driven the same way the rest of this cloud already is: declaratively, from Git, reconciled by a controller. Today the routers are still configured imperatively (SSH + versioned `.rsc` snapshots, and in a couple of spots a fragile `expect` wrapper); the API is the path off that.
 
-[minio](https://min.io/) is the simplest to manage and utilize. It has an S3 like API and is a lot less work than other tools like GlusterFS and Ceph. 
+## What RouterOS exposes
+- **REST API** (RouterOS v7.1+): a JSON wrapper over the console, reached at `https://<router>/rest/...` once the `www-ssl` service is on (HTTPS only — don't enable plain `www`). Full CRUD plus arbitrary console commands, and the URL path maps 1:1 to the CLI menu tree — `/ip/firewall/filter`, `/interface/vlan`, `/routing/bgp/connection` are all addressable resources. Both lab boxes already run a REST-capable release (leaf01 on 7.8, spine01 on 7.15.3); it's simply **not enabled yet** — a scoped service on a management address-list is the next step.
+- **Legacy binary API** (TCP 8728, or API-SSL 8729) for older tooling.
+- **IaC providers** that wrap the above: the [`terraform-routeros`](https://registry.terraform.io/providers/terraform-routeros/routeros/latest) provider and Ansible's [`community.routeros`](https://galaxy.ansible.com/ui/repo/published/community/routeros/) collection — so VLANs, firewall rules, address-lists, and BGP sessions become plan-and-apply resources with state and drift detection, exactly like the OpenTofu stacks that already manage our AWS account.
+
+## Why this is the future of multi-tenant isolation
+A tenant on this fabric is really just a bundle of network objects: a **VLAN** (or VRF) and subnet per leaf, an **address-list** for its hosts, **forward-chain firewall rules** (default-deny, allow only that tenant's flows), and **BGP filters** controlling which prefixes it may advertise or receive. All of those are API resources. Mint them programmatically and you get **VPC-style isolation as a primitive** — the self-hosted answer to AWS VPCs + security groups, on $250 hardware.
+
+The payoff is closing the gap this doc keeps flagging — *"not yet a single integrated control plane; RouterOS and Cilium are managed separately."* With the API on, both halves become reconcilable from one place:
+
+- **Fabric layer (RouterOS):** per-tenant VLAN/subnet, inter-segment firewall policy, BGP import/export filters.
+- **Cluster layer (Cilium):** per-tenant `NetworkPolicy`, LB-IPAM pools, BGP peering for the tenant's service IPs.
+
+A small operator — a tenant `Tenant` CRD reconciled by Flux, the same GitOps loop that already drives [Garage, Zot, cert-manager, and the AWS stacks](#the-cloud-it-became-aws--self-hosted) — could render one declaration into **both** RouterOS API calls and Cilium objects. That's tenant isolation that spans wire and cluster from a single source of truth: declarative, auditable (every change a Git commit), and self-healing. The hardware is already capable; turning on the API is what makes the network a first-class, programmable part of the cloud instead of the one box you still SSH into by hand.
+
+# Power budget
+Beyond the nodes, the fabric shares the rack's envelope:
+
+| device | role | power (typical) |
+|---|---|---|
+| **leaf routers** (RB5009UPr+S+IN) | leaf / PoE source | ~12 W self; **PoE-out budget 130 W** (25 W/port × 8) |
+| **spine** (CRS309-1G-8S+IN) | L3 spine | ~15–20 W (SFP+ optics add up) |
+| **edge router** (x86) | edge / NAT / FRR | ~10–20 W |
+| **CM4 nodes ×5** | k8s cluster | ~25–40 W aggregate |
+| **USB SSDs ×2** | object storage (Garage) | ~2–4 W each under load |
 
 # UPS
 Rack Mounted DIY Battery Packs
 
-Yes, we're going _that_ deep. If you want to of course. 
-
-Building batteries from old laptop and car cells is a way to learn how do design power capacity for your datacenter. This is important information if you ever need to design or scope out a cage at a datacenter. Building batteries is also just fun. You can get really creative here with batteries and use all kinds of cells. My personal interest is in batteries that won't catch fire or explode. I'd also prefer batteries that don't off-gas in my office/microdatacenter space. 
-
-If you're not familiar with battery types, it's a great time to learn the difference. My personal favorite is [Lithium-titanate batteries](https://en.wikipedia.org/wiki/Lithium-titanate_battery). These are used in things like weather stations where they are not accessible and have very high recharge cycles. They're basically 20+ year batteries. Their power density isn't as high, but they're safe and won't explode and have a much larger temperature range than typical lithium batteries. LiFePO4 are also safe batteries for this kind of thing. 
+Yes, we're going _that_ deep. If you want to of course. Building batteries from old laptop and car cells is a way to learn how to design power capacity for your datacenter — important if you ever need to scope out a cage. My personal favorite is [Lithium-titanate](https://en.wikipedia.org/wiki/Lithium-titanate_battery): used in things like weather stations, very high recharge cycles (20+ year batteries), safe, won't explode, wide temperature range. LiFePO4 are also safe for this.
