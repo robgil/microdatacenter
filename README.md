@@ -1,5 +1,9 @@
 # Micro Datacenter Project
-This is a project to compile the necessary information to create a personal micro datacenter. This is largely for educational purposes, but can also be used for a personal lab or hosting personal services (website, files, etc)
+This is a project to compile the necessary information to create a personal micro datacenter. This is largely for educational purposes, but can also be used for a personal lab or hosting personal services (website, files, etc).
+
+> **About this doc:** the first half is the original **draft design** — the rack, the BOM, the
+> low-power host. The second half is **where it went**: a working, AWS-style **private cloud** built
+> on that rack. Cost figures are reconciled to a **June 2026** price check (see *Cost: then vs now*).
 
 ## What is a micro datacenter?
 This is largely opinion, but for the purposes of this project, we'll define it as the following.
@@ -8,7 +12,7 @@ _A micro datacenter is a fully functioning, ultra low power, and distributed dat
 
 Also, it's bare metal...
 
-But why? 
+But why?
 
 Most folks, myself included, have always run some form of lab at home. This comes with a host of challenges and annoyances.
 - Enormous power requirements for anything more than 1/2 a rack of servers
@@ -16,11 +20,38 @@ Most folks, myself included, have always run some form of lab at home. This come
 - Old servers that are out of support, clunky, expensive to fix and upgrade, etc
 - Overloading those servers with VMs
 - Many folks run VMWare ESX, but that can be pricey
-- Upgrades? What's that? 
-  - Who actually has the funds to regularly ugprade their lab?
+- Upgrades? What's that?
+  - Who actually has the funds to regularly upgrade their lab?
+
+## The cloud it became: AWS → self-hosted
+The rack below now runs as a small **AWS-style private cloud** — object storage, a container registry,
+certificate issuance, software-defined networking, DNS, load balancing, GitOps delivery — all
+self-hosted, all on an internal `.internal` TLD, no public cloud bill.
+
+| AWS service | Self-hosted equivalent | Notes |
+|---|---|---|
+| **S3** (object store) | **Garage** (Deuxfleurs) | 2-node `rf=2` on USB SSDs; TLS → `s3.internal`. Backs OpenTofu state + the registry. |
+| **ECR** (container registry) | **Zot** (OCI registry) | HTTPS → `registry.internal`; backed by a Garage `oci-registry` bucket. |
+| **ACM** (cert management) | **cert-manager** + offline root CA | RSA-4096 `lab-internal-ca` (no Let's Encrypt — `.internal` isn't public); issues `*.internal` leaf certs. |
+| **VPC** (SDN / overlay) | **Cilium** CNI | VXLAN overlay, kube-proxy replacement, IPAM (pods `100.64.0.0/16`, LB `100.65.0.0/24`). |
+| **Internet Gateway / route prop.** | **Cilium BGP** + leaf/spine eBGP | Cilium (AS65300) peers the leaf; LB `/32`s ride the BGP fabric. Default originates at the edge (AS65000). |
+| **ELB / NLB** | **Cilium LB-IPAM** + **kube-vip** | Service VIPs from `100.65.0.0/24`; kube-vip holds the API control-plane VIP. |
+| **Route 53** (DNS) | **PowerDNS-auth** (edge) | Authoritative for `.internal`; leaves recurse to the internet. *(Real Route 53 zones are managed as IaC — below.)* |
+| **NAT Gateway / edge router** | **edge router** (x86, FRR) | The **only** NAT; masquerades out the Wi-Fi uplink, originates the default into BGP. Inside is pure routed BGP. |
+| **VPC DHCP options / DHCP** | **RouterOS DHCP** (leaf) | Per-VLAN DHCP with reservations for the k8s nodes. |
+| **OpenSearch / CloudWatch Logs / CloudTrail** | **Elasticsearch + Kibana** (ECK) | 3 nodes, TLS via cert-manager; Beats ship app/system logs *and* the audit trail (k8s API audit, host auth/syslog). |
+| **CloudWatch agent** | **Filebeat + Metricbeat** | In-cluster ECK `Beat` DaemonSets + off-cluster on the edge/workstation. |
+| **IAM** | **IAM** (still AWS, IaC-managed) | Imported zero-diff; least-priv automation user drives Route 53 from the cluster. |
+| **CloudFormation / CDK** | **OpenTofu** + **Flux tofu-controller** | GitOps reconcile; state in Garage S3, not AWS S3. |
+| **CodePipeline + CodeDeploy** (CD) | **Flux** (GitOps) | No AWS service maps 1:1 — AWS's *own* answer is the managed **Flux add-on for EKS**, so we run upstream Flux. Pull-only, zero inbound. |
+| **Network firewall / security groups** | leaf forward-chain (RB5009) + Cilium policy | Default-deny between segments. *Not yet a single integrated control plane* — RouterOS + Cilium are managed separately. |
+
+The only "real" AWS left is an account managed **as IaC from the lab**: OpenTofu stacks (`iam/`,
+`route53/`) keep their state in our own Garage S3 and are reconciled by an in-cluster Flux
+tofu-controller. Even the cloud account is run from the micro datacenter's own services.
 
 # Draft Design
-In this draft design, I'll lay out the rack design and hardware necessary to power dozens of servers. 
+In this draft design, I'll lay out the rack design and hardware necessary to power dozens of servers.
 
 ## BOM
 - [Mobile 1/2 cabinet](https://www.amazon.com/NavePoint-Server-Cabinet-Casters-Shelves/dp/B01I48EJOW/) (or 1/4 cabinet if you want to do a smaller version)
@@ -30,7 +61,7 @@ In this draft design, I'll lay out the rack design and hardware necessary to pow
 - POE Switch (Ex. [NETGEAR 24 Port POE Switch](https://www.amazon.com/NETGEAR-24-Port-Gigabit-Ethernet-Unmanaged/dp/B07Z8P4ZPW/))
 - [Raspberry Pi DIN Rail Mount](https://www.amazon.com/Winford-Engineering-Raspberry-L-Bracket-Compliant/dp/B083YSWYW1/)
 - [NVMe 2242](https://www.amazon.com/Sabrent-DRAM-Less-Internal-Performance-SB-1342-512/dp/B07XVR1KKR/)
-- [PoE USB C Splitter](https://www.amazon.com/dp/B0CHW5K5F4) Be careful with PoE USB Splitters. Not all are created equal. The one I linked is 5v at 4 Amp. The [Utronics](https://www.amazon.com/UCTRONICS-PoE-Splitter-USB-C-Compliant/dp/B087F4QCTR/) is only 2.4 Amp. I've also had some of the Utronics fail on me, so it's worth it to get a beefier splitter, especially if you have more to power. 
+- [PoE USB C Splitter](https://www.amazon.com/dp/B0CHW5K5F4) Be careful with PoE USB Splitters. Not all are created equal. The one I linked is 5v at 4 Amp. The [Utronics](https://www.amazon.com/UCTRONICS-PoE-Splitter-USB-C-Compliant/dp/B087F4QCTR/) is only 2.4 Amp. I've also had some of the Utronics fail on me, so it's worth it to get a beefier splitter, especially if you have more to power.
 
 # The Rack
 Do you need to do 1/2 a cabinet? No. You could do this smaller. But for this example, I'll do 1/2 a cabinet with room for things like battery backup / UPS
@@ -40,90 +71,119 @@ Do you need to do 1/2 a cabinet? No. You could do this smaller. But for this exa
 
 Total: $574.00
 
-# The basic host
+# The basic host → instance types
 The basic host configuration is as follows
 - PoE Powered Raspberry Pi
 - NVMe Attached Disk
 - Vertically mounted on DIN rails
 - No case required - better airflow and cooling
 
-This ultra low profile design dispenses with the bulky and failure prone PoE HATs. The PoE hats often have fan failures and take up valuable HAT space for other things. The carrier board in this BOM has the NVMe on the bottom of the board. With this design, the disk and PoE do not take up any HAT space and also don't glog up the rack with USB cables. The NVMe is also attached with PCIe speed rather than USB. 
+This ultra low profile design dispenses with the bulky and failure prone PoE HATs. The PoE hats often have fan failures and take up valuable HAT space for other things. The carrier board in this BOM has the NVMe on the bottom of the board. With this design, the disk and PoE do not take up any HAT space and also don't clog up the rack with USB cables. The NVMe is also attached with PCIe speed rather than USB.
 
-Cost
-- NVMe (512G): 69$
-- Raspberry Pi 4 (8G): 75$
-- Waveshare Carrier Board: 30$
-- DIN Mount: 15$
-- Network Port (Switch / Num Ports): $ 11.45 per port (1)
-- POE Splitter: 20$
+As the cluster grew, hosts got **AWS-style instance handles** (k8s label `node.lab/instance-type`).
+Handle format `<family><gen><storage>.<size>`: family `m`=general · `c`=compute · `r`=memory ·
+`n`=NPU · `g`=GPU; `d`=local NVMe; size = memory t-shirt (`large`=8 GiB, `xlarge`=16 GiB). The "basic
+host" above is now `m1d.large`.
 
-Total: $221.00 / node
+| instance-type | hardware | CPU | mem | disk | accel | status |
+|---|---|---|---|---|---|---|
+| `m1d.large` | Raspberry Pi CM4 | 4×A72 (ARMv8.0) | 8 GiB | 512 GB NVMe | — | **LIVE** — 5 nodes |
+| `n1d.xlarge` | Orange Pi 5 Pro | RK3588S A76/A55 (ARMv8.2) | 16 GiB | 1 TB NVMe | 6-TOPS NPU | planned |
+| `g1d.large` | Jetson Orin Nano Super | 6×A78AE (ARMv8.2) | 8 GiB | 1 TB NVMe | ~67-TOPS GPU | planned |
 
-Could you get used gear for this cheap? Yes. Would it be more powerful? Yes. But...
-- It's bulky as hell (rackmount or old desktop)
-- Power hungry
-- Is not expandible
-- Doesn't grow past the built in number of SATA ports
+### Power utilization
+Board-level draw with NVMe attached — typical vendor/community figures, not yet metered.
+
+| instance-type | idle | typical | peak (CPU+accel) | notes |
+|---|---|---|---|---|
+| `m1d.large` (CM4) | ~3 W | ~5–6 W | ~7–8 W | 5 nodes ≈ **25–40 W** for the whole cluster. |
+| `n1d.xlarge` (Orange Pi 5 Pro) | ~2–3 W | ~5–7 W | ~10–12 W | RK3588S + NPU; spikes under NPU inference. |
+| `g1d.large` (Jetson Orin Nano Super) | ~5 W | ~10–15 W | **up to 25 W** | Power modes 7/15/25 W; cap via `nvpmodel`. |
+
+The whole live cluster idles around the power of a single light bulb — the original "runs off a
+20A 110V outlet" goal holds with enormous headroom.
+
+# Cost: then vs now
+The original basic-host BOM (still a great deal):
+
+- NVMe (512G): $69
+- Raspberry Pi 4 (8G): $75
+- Waveshare Carrier Board: $30
+- DIN Mount: $15
+- Network Port (Switch / Num Ports): $11.45 per port (1)
+- POE Splitter: $20
+
+Total: **$221.00 / node**
+
+A **June 2026** price check on a like-for-like **node-only** basis (switch-port share moved to
+networking, below):
+
+> ⚠️ **NAND flash crisis (2026):** AI/datacenter demand roughly *doubled* SSD prices year-over-year —
+> 1 TB NVMe now runs ~$150 where it was ~$70. Storage is the dominant cost mover across every node.
+
+| component | then | now (Jun 2026) | Δ | what moved |
+|---|---|---|---|---|
+| Raspberry Pi CM4 (8 GB, no Wi-Fi) | $75 | ~$75 (official $56.25 + reseller markup) | ~$0 | official fell then ticked back up Apr 2026; reseller markup nets flat. |
+| NVMe 512 GB (Sabrent SB-1342-512) | $69 | ~$80 | +$11 | NAND crisis + the exact 2242 SKU is scarce (discontinued). |
+| Waveshare CM4-IO-BASE-B | $30 | ~$43 | +$13 | up. |
+| PoE USB-C splitter (5 V/4 A) | $20 | ~$22 | +$2 | flat. |
+| DIN-rail mount | $15 | ~$16 | +$1 | flat. |
+| **per node (node-only)** | **$209** | **~$236** | **+$27 (~13%)** | |
+| **cluster (×5)** | **$1,045** | **~$1,180** | **+$135** | |
+
+**Planned acceleration nodes** (new, with 1 TB NVMe): `n1d.xlarge` (Orange Pi 5 Pro 16 GB) ~**$330**;
+`g1d.large` (Jetson Orin Nano Super dev kit + 1 TB) ~**$400** — ~$150 of which is the SSD alone. If
+those boards are on the roadmap, buying the drives sooner is the hedge against further NAND increases.
+
+**Networking + shared infra (priced separately):** each PoE node consumes a switch port — a 24-port
+PoE switch runs $180–390 (~$8–16/port) — plus the rack above (~$574) and a UPS.
+
+> Could you get used gear for this cheap? Yes. Would it be more powerful? Yes. But...
+> - It's bulky as hell (rackmount or old desktop)
+> - Power hungry
+> - Is not expandable
+> - Doesn't grow past the built in number of SATA ports
+>
+> Price-check sources: [RPi CM4 brief](https://datasheets.raspberrypi.com/cm4/cm4-product-brief.pdf), [SSD tracking — NAND crisis (Tom's Hardware)](https://www.tomshardware.com/pc-components/ssds/ssd-price-tracking-2026-lowest-price-on-every-m-2-ssd), [Sabrent SB-1342-512 (out of stock)](https://www.newegg.com/sabrent-rocket-2242-512gb/p/0D9-001Y-00018), [NETGEAR 24-port PoE](https://www.netgear.com/business/wired/switches/24-port-switch/).
 
 # Density
-With the above BOM (Bill of Materials) we'll be able to get roughly 18 servers in to 6U. This assumes 2" width per server. If you choose to go with SSD instead of NVMe, it can be cheaper, but you'll need additional DIN mounts and it takes up more rack space. Also add on the cost of the USB cables. 
+With the above BOM we'll be able to get roughly 18 servers into 6U. This assumes 2" width per server. If you choose to go with SSD instead of NVMe, it can be cheaper, but you'll need additional DIN mounts and it takes up more rack space. Also add on the cost of the USB cables.
 
-Basically you'd need a 24port switch for every 6U. 
+Basically you'd need a 24-port switch for every 6U. So in 7U, you'd have the switch, and 18 servers, with cable management. In that 22U cabinet, you could fit *54 servers*.... now we're talking.
 
-So in 7U, you'd have the switch, and 18 servers, with cable management. 
+# How it's actually built
+The draft below called the shots on the broad strokes; here's where each landed.
 
-In that 22U cabinet, you could fit *54 servers*.... now we're talking.
+## Routing
+[FRRouting](https://frrouting.org/) is the routing stack — substantially cheaper than buying/reusing a purpose-built switch or router, and the point is to learn the internals. The micro datacenter runs a **routed spine/leaf BGP fabric**: an x86 edge router (FRR, the only NAT) → a CRS309 L3 spine → RB5009 leaves, every box its own private ASN (eBGP-to-the-device). Transit links are routed `/30`s; LAN edges are VLAN-segmented. (The teased eVPN/VXLAN multi-tenant overlay is handled at the k8s layer by Cilium rather than on the fabric itself.)
 
-# Server Management and Imaging
-[Tinkerbell](https://tinkerbell.org/) is an automated DHCP, NETBOOT, and PXE physical host provisioning service. To keep costs down, you can run this on your desktop in VMs initially. You can also run it on some of your nodes if you have a multi purpose node (something like a shared DHCP, DNS, Tinkerbell, image store, etc)
+## Public IP space & Elastic IPs
+So you want to learn IPv6? You could get your own ASN and IP space for about $1000 (ASN $500, /36 IPv6 $500 — the smallest ARIN allocates). With the routing setup you can advertise that space through a provider like Equinix Metal, or use AWS BYOIP + Transit Gateway Connect. **Elastic IPs** — a public IP NAT'd to a private one — are achieved here without fancy offload NICs by running **BGP on every node**: for Kubernetes workloads, **Cilium** advertises the service IP via BGP to the core network and out (if you're peering publicly).
 
-# Routing
-[FRRouting](https://frrouting.org/) is an Open Source routing stack. This is the stack I would recommend for any home lab. This can be run on any linux host and is substantially cheaper than buying or re-using some purpose build switch or router. The goal of this project is to learn the internals, so running FRR is a good way to familiarize yourself with networking protocols. 
+## Server management and imaging
+[Tinkerbell](https://tinkerbell.org/) for automated DHCP/NETBOOT/PXE provisioning — runnable in VMs on your desktop initially, or on a shared multi-purpose node (DHCP/DNS/image store). *(In practice the cluster is currently provisioned with Ansible; Tinkerbell remains the netboot direction.)*
 
-As we delve in to more detail, FRR becoming increasingly important to learn cloud networking concepts. I'm not talking about simple concepts like IGWs or VPC Route Tables. I mean the underpinning of VPCs in general. In a later article, I'll describe how you can create your own VPC networking with eVPN and VXLAN using FRRouting. This is the basis for undestanding multi tenant network architecture (hint, it's all encapsulated in the datacenter). 
+## Kubernetes
+[k3s](https://k3s.io/) is the balance point for a home lab — light, with first-class **Cilium** support that ties into the routing stack. Live across the CM4 nodes, with kube-vip for the API VIP and Flux for GitOps delivery of services.
 
-## Public IP Space 
-So you want to learn IPv6? Well, you could get your own ASN and IP space for about $1000.
-- ASN: 500$
-- /36 IPv6: 500$
+## Distributed storage
+The draft favored [minio](https://min.io/) for a simple S3-like API. The project ultimately landed on **[Garage](https://garagehq.deuxfleurs.fr/)** instead — similarly lightweight and S3-compatible, but a better fit for small, replicated, multi-node setups (currently 2-node `rf=2` across USB SSDs, fronting both the OpenTofu state and the Zot registry).
 
-_/36 is the smallest ARIN will allocate at the time of writing_
+## Firewall
+Kept simple to understand it — no PFSense. We do it the hard way for learning: `nftables` / `bpfilter` / `iptables` on the hosts, leaf forward-chain policy on the RB5009s, and Cilium NetworkPolicy in-cluster (default-deny between segments).
 
-Seems a little steep for most home SREs. But imagine all the money you'll save in not buying rackmount servers or powering them. 
+# Power budget
+Beyond the nodes, the fabric shares the rack's envelope:
 
-With the routing setup and OpenSwitch, you can advertise your IP space through a provider like Equinix Metal (ask me how I know). You'll be able to have your own publicly routable IPv6 space. You can also use AWS BYOIP and [TransitGateway Connect](https://aws.amazon.com/about-aws/whats-new/2020/12/introducing-aws-transit-gateway-connect-to-simplify-sd-wan-branch-connectivity/)
-
-If you're more adventurous, have a bottomless wallet, or already have IPv4 space, you can do that too. 
-
-## Accessing Your Microdatacenter (no static addressing from your home ISP)
-You can use either wireguard or IPSec up to an Equinix Metal host or to AWS (or any other provider that can handle BGP)
-
-# Elastic IPs
-Elastic IPs, which you may be familar with from AWS. What this really is is just a public IP that is NAT'd to an ENI/Private IP. How do you achieve this in your microdatacenter? We don't have fancy network cards that offload this, so in order to do this, it's as simple as running BGP on every node. 
-
-For kubernetes workloads, we'll use Cilium to advertise the public IP (Elastic IP) via BGP to the core network and out to the internet (if you're doing public peering)
-
-
-# Firewall
-Firewalls we'll keep simple to understand them. No, we're not going to use PFSense for these exercises. We'll do it the hard way for the purposes of learning. 
-
-nftables, bpfilter, iptables, etc
-
-# k8s
-Kubernetes has always been a bit of a struggle in home labs. It's annoying running every service and having enough infrastructure to do so. The balance I've found is utilizing [k3s](https://k3s.io/)
-
-This has support for things like Cilium, which ties in nicely to the routing stack. 
-
-# Distributed Storage
-How do you do persistent storage? What can you use for shared storage and object stores? 
-
-[minio](https://min.io/) is the simplest to manage and utilize. It has an S3 like API and is a lot less work than other tools like GlusterFS and Ceph. 
+| device | role | power (typical) |
+|---|---|---|
+| **leaf routers** (RB5009UPr+S+IN) | leaf / PoE source | ~12 W self; **PoE-out budget 130 W** (25 W/port × 8) |
+| **spine** (CRS309-1G-8S+IN) | L3 spine | ~15–20 W (SFP+ optics add up) |
+| **edge router** (x86) | edge / NAT / FRR | ~10–20 W |
+| **CM4 nodes ×5** | k8s cluster | ~25–40 W aggregate |
+| **USB SSDs ×2** | object storage (Garage) | ~2–4 W each under load |
 
 # UPS
 Rack Mounted DIY Battery Packs
 
-Yes, we're going _that_ deep. If you want to of course. 
-
-Building batteries from old laptop and car cells is a way to learn how do design power capacity for your datacenter. This is important information if you ever need to design or scope out a cage at a datacenter. Building batteries is also just fun. You can get really creative here with batteries and use all kinds of cells. My personal interest is in batteries that won't catch fire or explode. I'd also prefer batteries that don't off-gas in my office/microdatacenter space. 
-
-If you're not familiar with battery types, it's a great time to learn the difference. My personal favorite is [Lithium-titanate batteries](https://en.wikipedia.org/wiki/Lithium-titanate_battery). These are used in things like weather stations where they are not accessible and have very high recharge cycles. They're basically 20+ year batteries. Their power density isn't as high, but they're safe and won't explode and have a much larger temperature range than typical lithium batteries. LiFePO4 are also safe batteries for this kind of thing. 
+Yes, we're going _that_ deep. If you want to of course. Building batteries from old laptop and car cells is a way to learn how to design power capacity for your datacenter — important if you ever need to scope out a cage. My personal favorite is [Lithium-titanate](https://en.wikipedia.org/wiki/Lithium-titanate_battery): used in things like weather stations, very high recharge cycles (20+ year batteries), safe, won't explode, wide temperature range. LiFePO4 are also safe for this.
