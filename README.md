@@ -169,6 +169,11 @@ The draft below called the shots on the broad strokes; here's where each landed.
 ## Routing
 [FRRouting](https://frrouting.org/) is the routing stack — substantially cheaper than buying/reusing a purpose-built switch or router, and the point is to learn the internals. The micro datacenter runs a **routed spine/leaf BGP fabric**: an x86 edge router (FRR, the only NAT) → a CRS309 L3 spine → RB5009 leaves, every box its own private ASN (eBGP-to-the-device). Transit links are routed `/30`s; LAN edges are VLAN-segmented. (The teased eVPN/VXLAN multi-tenant overlay is handled at the k8s layer by Cilium rather than on the fabric itself.)
 
+### The edge node — "Odyssey" (environment-specific, you probably don't need it)
+**core01** in the diagrams is a [Seeed Studio Odyssey](https://www.seeedstudio.com/Odyssey-Blue-J4125-p-4925.html) — a small x86 single-board computer running FRRouting. In the fabric it's `AS65000`: it originates the default route and is the **only NAT** in the whole build, masquerading the lab out to the internet over its **Wi-Fi** uplink (`wlo2`), with a 1G RJ45-SFP transit link (`enp3s0`) down to the spine.
+
+**Why Wi-Fi, and why it sits outside the rack — this is specific to my environment.** Where this is currently running there's no wired internet drop, so the Odyssey bridges Wi-Fi → the wired fabric and physically lives outside the rack next to the access point. **In a normal deployment you don't need it:** plug your internet handoff (ONT / modem / router uplink) **directly into a spine SFP+ port** and let the spine (or a leaf) handle NAT and default-route origination. The separate edge box is a workaround for "no Ethernet where the rack lives," not part of the core design — read it as an adapter, and mentally collapse `Internet → Odyssey → spine` into `Internet → spine` if you have wired networking.
+
 ### L1 — Physical
 The fabric routes through the **spine01** L3 spine (CRS309); leaf02/garage is racked but powered off (optional second leaf).
 
@@ -228,6 +233,11 @@ So you want to learn IPv6? You could get your own ASN and IP space for about $10
 
 ## Distributed storage
 The draft favored [minio](https://min.io/) for a simple S3-like API. The project ultimately landed on **[Garage](https://garagehq.deuxfleurs.fr/)** instead — similarly lightweight and S3-compatible, but a better fit for small, replicated, multi-node setups (currently 2-node `rf=2` across USB SSDs, fronting both the OpenTofu state and the Zot registry).
+
+## DNS (`.internal`)
+[PowerDNS](https://www.powerdns.com/) is authoritative for the internal `.internal` TLD — the Route 53 stand-in for service and host names (`s3.internal`, `registry.internal`, `mdc01.mdc.internal`, etc.). The leaves recurse the public internet and forward `*.internal` queries to it.
+
+**Caveat (environment-specific):** PowerDNS currently runs on the Odyssey edge node, *outside* the rack — so `.internal` resolution depends on a box that isn't really part of the rack. It **should** be hosted in-rack (on the k8s cluster, or a small service node), and moving it there is a TODO. Same spirit as the edge note above: the current placement reflects my environment, not the intended design.
 
 ## Firewall
 Kept simple to understand it — no PFSense. We do it the hard way for learning: `nftables` / `bpfilter` / `iptables` on the hosts, leaf forward-chain policy on the RB5009s, and Cilium NetworkPolicy in-cluster (default-deny between segments).
