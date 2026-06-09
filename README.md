@@ -234,6 +234,11 @@ So you want to learn IPv6? You could get your own ASN and IP space for about $10
 ## Distributed storage
 The draft favored [minio](https://min.io/) for a simple S3-like API. The project ultimately landed on **[Garage](https://garagehq.deuxfleurs.fr/)** instead — similarly lightweight and S3-compatible, but a better fit for small, replicated, multi-node setups (currently 2-node `rf=2` across USB SSDs, fronting both the OpenTofu state and the Zot registry).
 
+## DNS (`.internal`)
+[PowerDNS](https://www.powerdns.com/) is authoritative for the internal `.internal` TLD — the Route 53 stand-in for service and host names (`s3.internal`, `registry.internal`, `mdc01.mdc.internal`, etc.). The leaves recurse the public internet and forward `*.internal` queries to it.
+
+**Caveat (environment-specific):** PowerDNS currently runs on the Odyssey edge node, *outside* the rack — so `.internal` resolution depends on a box that isn't really part of the rack. It **should** be hosted in-rack (on the k8s cluster, or a small service node), and moving it there is a TODO. Same spirit as the edge note above: the current placement reflects my environment, not the intended design.
+
 ## Firewall
 Kept simple to understand it — no PFSense. We do it the hard way for learning: `nftables` / `bpfilter` / `iptables` on the hosts, leaf forward-chain policy on the RB5009s, and Cilium NetworkPolicy in-cluster (default-deny between segments).
 
