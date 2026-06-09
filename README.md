@@ -19,7 +19,7 @@ Most folks, myself included, have always run some form of lab at home. This come
 - Expensive, power hungry servers
 - Old servers that are out of support, clunky, expensive to fix and upgrade, etc
 - Overloading those servers with VMs
-- Many folks run VMWare ESX, but that can be pricey
+- Many folks run VMWare ESX or Proxmox, but that can be pricey
 - Upgrades? What's that?
   - Who actually has the funds to regularly upgrade their lab?
 
@@ -33,7 +33,7 @@ self-hosted, all on an internal `.internal` TLD, no public cloud bill.
 | **S3** (object store) | **Garage** (Deuxfleurs) | 2-node `rf=2` on USB SSDs; TLS → `s3.internal`. Backs OpenTofu state + the registry. |
 | **ECR** (container registry) | **Zot** (OCI registry) | HTTPS → `registry.internal`; backed by a Garage `oci-registry` bucket. |
 | **ACM** (cert management) | **cert-manager** + offline root CA | RSA-4096 `lab-internal-ca` (no Let's Encrypt — `.internal` isn't public); issues `*.internal` leaf certs. |
-| **VPC** (SDN / overlay) | **Cilium** CNI | VXLAN overlay, kube-proxy replacement, IPAM (pods `100.64.0.0/16`, LB `100.65.0.0/24`). |
+| **VPC** (SDN / overlay) | **Cilium** CNI | VXLAN overlay, kube-proxy replacement, IPAM (pods `100.64.0.0/16`, LB `100.65.0.0/24`). This is not a true VPC, but good enough for now. Other projects like KubeOVN or Multus might be good solutions here|
 | **Internet Gateway / route prop.** | **Cilium BGP** + leaf/spine eBGP | Cilium (AS65300) peers the leaf; LB `/32`s ride the BGP fabric. Default originates at the edge (AS65000). |
 | **ELB / NLB** | **Cilium LB-IPAM** + **kube-vip** | Service VIPs from `100.65.0.0/24`; kube-vip holds the API control-plane VIP. |
 | **Route 53** (DNS) | **PowerDNS-auth** (edge) | Authoritative for `.internal`; leaves recurse to the internet. *(Real Route 53 zones are managed as IaC — below.)* |
@@ -233,11 +233,6 @@ So you want to learn IPv6? You could get your own ASN and IP space for about $10
 
 ## Distributed storage
 The draft favored [minio](https://min.io/) for a simple S3-like API. The project ultimately landed on **[Garage](https://garagehq.deuxfleurs.fr/)** instead — similarly lightweight and S3-compatible, but a better fit for small, replicated, multi-node setups (currently 2-node `rf=2` across USB SSDs, fronting both the OpenTofu state and the Zot registry).
-
-## DNS (`.internal`)
-[PowerDNS](https://www.powerdns.com/) is authoritative for the internal `.internal` TLD — the Route 53 stand-in for service and host names (`s3.internal`, `registry.internal`, `mdc01.mdc.internal`, etc.). The leaves recurse the public internet and forward `*.internal` queries to it.
-
-**Caveat (environment-specific):** PowerDNS currently runs on the Odyssey edge node, *outside* the rack — so `.internal` resolution depends on a box that isn't really part of the rack. It **should** be hosted in-rack (on the k8s cluster, or a small service node), and moving it there is a TODO. Same spirit as the edge note above: the current placement reflects my environment, not the intended design.
 
 ## Firewall
 Kept simple to understand it — no PFSense. We do it the hard way for learning: `nftables` / `bpfilter` / `iptables` on the hosts, leaf forward-chain policy on the RB5009s, and Cilium NetworkPolicy in-cluster (default-deny between segments).
