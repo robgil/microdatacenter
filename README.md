@@ -19,7 +19,7 @@ Most folks, myself included, have always run some form of lab at home. This come
 - Expensive, power hungry servers
 - Old servers that are out of support, clunky, expensive to fix and upgrade, etc
 - Overloading those servers with VMs
-- Many folks run VMWare ESX, but that can be pricey
+- Many folks run VMWare ESX or Proxmox, but that can be pricey
 - Upgrades? What's that?
   - Who actually has the funds to regularly upgrade their lab?
 
@@ -33,7 +33,7 @@ self-hosted, all on an internal `.internal` TLD, no public cloud bill.
 | **S3** (object store) | **Garage** (Deuxfleurs) | 2-node `rf=2` on USB SSDs; TLS → `s3.internal`. Backs OpenTofu state + the registry. |
 | **ECR** (container registry) | **Zot** (OCI registry) | HTTPS → `registry.internal`; backed by a Garage `oci-registry` bucket. |
 | **ACM** (cert management) | **cert-manager** + offline root CA | RSA-4096 `lab-internal-ca` (no Let's Encrypt — `.internal` isn't public); issues `*.internal` leaf certs. |
-| **VPC** (SDN / overlay) | **Cilium** CNI | VXLAN overlay, kube-proxy replacement, IPAM (pods `100.64.0.0/16`, LB `100.65.0.0/24`). |
+| **VPC** (SDN / overlay) | **Cilium** CNI | VXLAN overlay, kube-proxy replacement, IPAM (pods `100.64.0.0/16`, LB `100.65.0.0/24`). This is not a true VPC, but good enough for now. Other projects like KubeOVN or Multus might be good solutions here|
 | **Internet Gateway / route prop.** | **Cilium BGP** + leaf/spine eBGP | Cilium (AS65300) peers the leaf; LB `/32`s ride the BGP fabric. Default originates at the edge (AS65000). |
 | **ELB / NLB** | **Cilium LB-IPAM** + **kube-vip** | Service VIPs from `100.65.0.0/24`; kube-vip holds the API control-plane VIP. |
 | **Route 53** (DNS) | **PowerDNS-auth** (edge) | Authoritative for `.internal`; leaves recurse to the internet. *(Real Route 53 zones are managed as IaC — below.)* |
